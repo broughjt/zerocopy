@@ -1885,6 +1885,14 @@ mod sealed {
     impl<'a> Sealed for &'a mut [u8] {}
     impl<'a> Sealed for Ref<'a, [u8]> {}
     impl<'a> Sealed for RefMut<'a, [u8]> {}
+    #[cfg(feature = "bytes")]
+    use bytes::{Bytes, BytesMut};
+    #[cfg(feature = "bytes")]
+    #[allow(clippy::extra_unused_lifetimes)]
+    impl<'a> Sealed for Bytes {}
+    #[cfg(feature = "bytes")]
+    #[allow(clippy::extra_unused_lifetimes)]
+    impl<'a> Sealed for BytesMut {}
 }
 
 // ByteSlice and ByteSliceMut abstract over [u8] references (&[u8], &mut [u8],
@@ -1976,6 +1984,46 @@ unsafe impl<'a> ByteSliceMut for &'a mut [u8] {
 unsafe impl<'a> ByteSliceMut for RefMut<'a, [u8]> {
     fn as_mut_ptr(&mut self) -> *mut u8 {
         <[u8]>::as_mut_ptr(self)
+    }
+}
+
+#[cfg(feature = "bytes")]
+mod bytes {
+    use bytes::{Bytes, BytesMut};
+
+    use super::{ByteSlice, ByteSliceMut};
+
+    #[allow(clippy::extra_unused_lifetimes)]
+    unsafe impl<'a> ByteSlice for Bytes {
+        fn as_ptr(&self) -> *const u8 {
+            <[u8]>::as_ptr(self)
+        }
+
+        fn split_at(mut self, middle: usize) -> (Self, Self) {
+            let other = self.split_off(middle);
+
+            (self, other)
+        }
+    }
+
+    #[allow(clippy::extra_unused_lifetimes)]
+    unsafe impl<'a> ByteSlice for BytesMut {
+        fn as_ptr(&self) -> *const u8 {
+            <[u8]>::as_ptr(self)
+        }
+
+        fn split_at(mut self, middle: usize) -> (Self, Self) {
+            let other = self.split_off(middle);
+
+            (self, other)
+        }
+    }
+
+    #[allow(clippy::extra_unused_lifetimes)]
+    unsafe impl<'a> ByteSliceMut for BytesMut {
+        fn as_mut_ptr(&mut self) -> *mut u8 {
+            <[u8]>::as_mut_ptr(self)
+        }
     }
 }
 
@@ -2726,6 +2774,25 @@ mod tests {
         let foo = Foo { a: [0xFFFF; 33] };
         let expected = [0xFFu8; 66];
         assert_eq!(foo.as_bytes(), &expected[..]);
+    }
+
+    #[cfg(feature = "bytes")]
+    #[test]
+    fn test_bytes_layout_verified() {
+        use ::bytes::Bytes; // TODO: How to fix import name bashing?
+
+        const FOO: &[u8] = &[0xff; 12 * 2];
+
+        #[derive(Debug, FromBytes, AsBytes, Unaligned, Eq, PartialEq)]
+        #[repr(C)]
+        struct Foo {
+            a: [U16<BigEndian>; 12]
+        }
+
+        let bytes = Bytes::from_static(FOO);
+        let expected = [Foo { a: [U16::new(0xffff); 12] }];
+        let actual: &[Foo] = LayoutVerified::new_slice_unaligned(bytes).unwrap().into_slice();
+        assert_eq!(actual, &expected[..]);
     }
 
     #[test]
