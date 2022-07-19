@@ -2779,7 +2779,7 @@ mod tests {
     #[cfg(feature = "bytes")]
     #[test]
     fn test_bytes_layout_verified() {
-        use ::bytes::Bytes; // TODO: How to fix import name bashing?
+        use ::bytes::Bytes;
 
         const FOO: &[u8] = &[0xff; 12 * 2];
 
