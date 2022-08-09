@@ -28,7 +28,7 @@
 //! UDP:
 //!
 //! ```edition2018
-//! # use zerocopy::*;
+//! # use zerocopy_jackson::*;
 //! use ::byteorder::NetworkEndian;
 //!
 //! #[derive(FromBytes, AsBytes, Unaligned)]
@@ -69,7 +69,7 @@ use zerocopy_derive::*;
 use crate::AsBytes;
 // This allows the custom derives to work. See the comment on this module for an
 // explanation.
-use crate::zerocopy;
+use crate::zerocopy_jackson;
 
 // NOTE: We don't reexport `WriteBytesExt` or `ReadBytesExt` because those are
 // only available with the `std` feature enabled, and zerocopy is `no_std` by
