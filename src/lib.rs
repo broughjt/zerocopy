@@ -48,7 +48,7 @@
 pub mod byteorder;
 
 pub use crate::byteorder::*;
-pub use zerocopy_derive::*;
+pub use zerocopy_jackson_derive::*;
 
 use core::cell::{Ref, RefMut};
 use core::cmp::Ordering;

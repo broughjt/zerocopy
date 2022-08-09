@@ -1,6 +1,6 @@
 [package]
 edition = "2018"
-name = "zerocopy-derive"
+name = "zerocopy-jackson-derive"
 version = "0.3.1"
 authors = ["Joshua Liebow-Feeser <joshlf@google.com>"]
 description = "Custom derive for traits from the zerocopy crate"
@@ -18,5 +18,5 @@ quote = "1.0.10"
 syn = { version = "1.0.5", features = ["visit"] }
 
 [dev-dependencies]
-zerocopy = { path = "../" }
+zerocopy-jackson = { path = "../" }
 compiletest_rs = "0.7"

@@ -64,7 +64,7 @@ use core::fmt::{self, Binary, Debug, Display, Formatter, LowerHex, Octal, UpperH
 use core::marker::PhantomData;
 use core::num::TryFromIntError;
 
-use zerocopy_derive::*;
+use zerocopy_jackson_derive::*;
 
 use crate::AsBytes;
 // This allows the custom derives to work. See the comment on this module for an

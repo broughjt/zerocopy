@@ -1,0 +1,2 @@
+[registries]
+monucrates = { index = "ssh://git@bitbucket.org/monumetric/monucrates.git" }
