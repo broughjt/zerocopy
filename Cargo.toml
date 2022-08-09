@@ -1,6 +1,6 @@
 [package]
 name = "zerocopy-jackson"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 authors = ["Joshua Liebow-Feeser <joshlf@google.com>"]
 description = "Utilities for zero-copy parsing and serialization"
@@ -14,7 +14,6 @@ all-features = true
 
 [features]
 alloc = []
-bytes = ["dep:bytes"]
 simd = []
 simd-nightly = ["simd"]
 
