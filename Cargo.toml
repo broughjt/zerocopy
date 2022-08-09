@@ -1,5 +1,5 @@
 [package]
-name = "zerocopy"
+name = "zerocopy-jackson"
 version = "0.6.1"
 edition = "2021"
 authors = ["Joshua Liebow-Feeser <joshlf@google.com>"]
