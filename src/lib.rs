@@ -50,6 +50,7 @@ pub mod byteorder;
 pub use crate::byteorder::*;
 pub use zerocopy_jackson_derive::*;
 
+use core::borrow::{Borrow, BorrowMut};
 use core::cell::{Ref, RefMut};
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
@@ -230,7 +231,7 @@ pub unsafe trait FromBytes {
     /// Reads a copy of `Self` from `bytes`.
     ///
     /// If `bytes.len() != size_of::<Self>()`, `read_from` returns `None`.
-    fn read_from<B: ByteSlice>(bytes: B) -> Option<Self>
+    fn read_from<B: Deref<Target = [u8]>>(bytes: B) -> Option<Self>
     where
         Self: Sized,
     {
@@ -243,7 +244,7 @@ pub unsafe trait FromBytes {
     /// `read_from_prefix` reads a `Self` from the first `size_of::<Self>()`
     /// bytes of `bytes`. If `bytes.len() < size_of::<Self>()`, it returns
     /// `None`.
-    fn read_from_prefix<B: ByteSlice>(bytes: B) -> Option<Self>
+    fn read_from_prefix<B: Deref<Target = [u8]> + SplitAt>(bytes: B) -> Option<Self>
     where
         Self: Sized,
     {
@@ -256,7 +257,7 @@ pub unsafe trait FromBytes {
     /// `read_from_suffix` reads a `Self` from the last `size_of::<Self>()`
     /// bytes of `bytes`. If `bytes.len() < size_of::<Self>()`, it returns
     /// `None`.
-    fn read_from_suffix<B: ByteSlice>(bytes: B) -> Option<Self>
+    fn read_from_suffix<B: Deref<Target = [u8]> + SplitAt>(bytes: B) -> Option<Self>
     where
         Self: Sized,
     {
@@ -302,16 +303,17 @@ pub unsafe trait FromBytes {
         // If T is a ZST, then return a proper boxed instance of it. There is no
         // allocation, but Box does require a correct dangling pointer.
         let layout = Layout::new::<Self>();
-        if layout.size() == 0 {
-            return Box::new(Self::new_zeroed());
-        }
 
-        unsafe {
-            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut Self;
-            if ptr.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+        if layout.size() == 0 {
+            Box::new(Self::new_zeroed())
+        } else {
+            unsafe {
+                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut Self;
+                if ptr.is_null() {
+                    alloc::alloc::handle_alloc_error(layout);
+                }
+                Box::from_raw(ptr)
             }
-            Box::from_raw(ptr)
         }
     }
 
@@ -351,18 +353,18 @@ pub unsafe trait FromBytes {
                 size_of::<Self>().checked_mul(len).unwrap(),
                 align_of::<Self>(),
             );
-            if layout.size() != 0 {
+            Box::from_raw(if layout.size() != 0 {
                 let ptr = alloc::alloc::alloc_zeroed(layout) as *mut Self;
                 if ptr.is_null() {
                     alloc::alloc::handle_alloc_error(layout);
                 }
-                Box::from_raw(slice::from_raw_parts_mut(ptr, len))
+                slice::from_raw_parts_mut(ptr, len)
             } else {
                 // Box<[T]> does not allocate when T is zero-sized or when len
                 // is zero, but it does require a non-null dangling pointer for
                 // its allocation.
-                Box::from_raw(slice::from_raw_parts_mut(NonNull::<Self>::dangling().as_ptr(), len))
-            }
+                slice::from_raw_parts_mut(NonNull::<Self>::dangling().as_ptr(), len)
+            })
         }
     }
 }
@@ -458,34 +460,34 @@ pub unsafe trait AsBytes {
     /// Writes a copy of `self` to `bytes`.
     ///
     /// If `bytes.len() != size_of_val(self)`, `write_to` returns `None`.
-    fn write_to<B: ByteSliceMut>(&self, mut bytes: B) -> Option<()> {
+    fn write_to<B: DerefMut<Target = [u8]>>(&self, mut bytes: B) -> Option<()> {
         if bytes.len() != mem::size_of_val(self) {
-            return None;
+            None
+        } else {
+            bytes.copy_from_slice(self.as_bytes());
+            Some(())
         }
-
-        bytes.copy_from_slice(self.as_bytes());
-        Some(())
     }
 
     /// Writes a copy of `self` to the prefix of `bytes`.
     ///
     /// `write_to_prefix` writes `self` to the first `size_of_val(self)` bytes
     /// of `bytes`. If `bytes.len() < size_of_val(self)`, it returns `None`.
-    fn write_to_prefix<B: ByteSliceMut>(&self, mut bytes: B) -> Option<()> {
+    fn write_to_prefix<B: DerefMut<Target = [u8]>>(&self, mut bytes: B) -> Option<()> {
         let size = mem::size_of_val(self);
         if bytes.len() < size {
-            return None;
+            None
+        } else {
+            bytes[..size].copy_from_slice(self.as_bytes());
+            Some(())
         }
-
-        bytes[..size].copy_from_slice(self.as_bytes());
-        Some(())
     }
 
     /// Writes a copy of `self` to the suffix of `bytes`.
     ///
     /// `write_to_suffix` writes `self` to the last `size_of_val(self)` bytes
     /// of `bytes`. If `bytes.len() < size_of_val(self)`, it returns `None`.
-    fn write_to_suffix<B: ByteSliceMut>(&self, mut bytes: B) -> Option<()> {
+    fn write_to_suffix<B: DerefMut<Target = [u8]>>(&self, mut bytes: B) -> Option<()> {
         let start = bytes.len().checked_sub(mem::size_of_val(self))?;
         bytes[start..].copy_from_slice(self.as_bytes());
         Some(())
@@ -849,7 +851,9 @@ macro_rules! transmute {
 /// reference were simply a reference to that type.
 ///
 /// ```rust
-/// use zerocopy_jackson::{AsBytes, ByteSlice, ByteSliceMut, FromBytes, LayoutVerified, Unaligned};
+/// use core::ops::{Deref, DerefMut};
+/// 
+/// use zerocopy_jackson::{AsBytes, FromBytes, LayoutVerified, SplitAt, Unaligned};
 ///
 /// #[derive(FromBytes, AsBytes, Unaligned)]
 /// #[repr(C)]
@@ -865,7 +869,7 @@ macro_rules! transmute {
 ///     body: B,
 /// }
 ///
-/// impl<B: ByteSlice> UdpPacket<B> {
+/// impl<B: Deref<Target = [u8]> + SplitAt> UdpPacket<B> {
 ///     pub fn parse(bytes: B) -> Option<UdpPacket<B>> {
 ///         let (header, body) = LayoutVerified::new_unaligned_from_prefix(bytes)?;
 ///         Some(UdpPacket { header, body })
@@ -876,7 +880,7 @@ macro_rules! transmute {
 ///     }
 /// }
 ///
-/// impl<B: ByteSliceMut> UdpPacket<B> {
+/// impl<B: DerefMut<Target = [u8]>> UdpPacket<B> {
 ///     pub fn set_src_port(&mut self, src_port: [u8; 2]) {
 ///         self.header.src_port = src_port;
 ///     }
@@ -886,7 +890,7 @@ pub struct LayoutVerified<B, T: ?Sized>(B, PhantomData<T>);
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
 {
     /// Constructs a new `LayoutVerified`.
     ///
@@ -895,12 +899,18 @@ where
     /// either of these checks fail, it returns `None`.
     #[inline]
     pub fn new(bytes: B) -> Option<LayoutVerified<B, T>> {
-        if bytes.len() != mem::size_of::<T>() || !aligned_to(bytes.deref(), mem::align_of::<T>()) {
-            return None;
+        if bytes.len() != mem::size_of::<T>() || !aligned_to(&bytes, mem::align_of::<T>()) {
+            None
+        } else {
+            Some(LayoutVerified(bytes, PhantomData))
         }
-        Some(LayoutVerified(bytes, PhantomData))
     }
+}
 
+impl<B, T> LayoutVerified<B, T>
+where
+    B: Deref<Target = [u8]> + SplitAt
+{
     /// Constructs a new `LayoutVerified` from the prefix of a byte slice.
     ///
     /// `new_from_prefix` verifies that `bytes.len() >= size_of::<T>()` and that
@@ -911,10 +921,11 @@ where
     #[inline]
     pub fn new_from_prefix(bytes: B) -> Option<(LayoutVerified<B, T>, B)> {
         if bytes.len() < mem::size_of::<T>() || !aligned_to(bytes.deref(), mem::align_of::<T>()) {
-            return None;
+            None
+        } else {
+            let (bytes, suffix) = bytes.split_at(mem::size_of::<T>());
+            Some((LayoutVerified(bytes, PhantomData), suffix))
         }
-        let (bytes, suffix) = bytes.split_at(mem::size_of::<T>());
-        Some((LayoutVerified(bytes, PhantomData), suffix))
     }
 
     /// Constructs a new `LayoutVerified` from the suffix of a byte slice.
@@ -929,19 +940,21 @@ where
     pub fn new_from_suffix(bytes: B) -> Option<(B, LayoutVerified<B, T>)> {
         let bytes_len = bytes.len();
         if bytes_len < mem::size_of::<T>() {
-            return None;
+            None
+        } else {
+            let (prefix, bytes) = bytes.split_at(bytes_len - mem::size_of::<T>());
+            if !aligned_to(bytes.deref(), mem::align_of::<T>()) {
+                None
+            } else {
+                Some((prefix, LayoutVerified(bytes, PhantomData)))
+            }
         }
-        let (prefix, bytes) = bytes.split_at(bytes_len - mem::size_of::<T>());
-        if !aligned_to(bytes.deref(), mem::align_of::<T>()) {
-            return None;
-        }
-        Some((prefix, LayoutVerified(bytes, PhantomData)))
     }
 }
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
 {
     /// Constructs a new `LayoutVerified` of a slice type.
     ///
@@ -957,13 +970,19 @@ where
     pub fn new_slice(bytes: B) -> Option<LayoutVerified<B, [T]>> {
         assert_ne!(mem::size_of::<T>(), 0);
         if bytes.len() % mem::size_of::<T>() != 0
-            || !aligned_to(bytes.deref(), mem::align_of::<T>())
+            || !aligned_to(&bytes, mem::align_of::<T>())
         {
-            return None;
+            None
+        } else {
+            Some(LayoutVerified(bytes, PhantomData))
         }
-        Some(LayoutVerified(bytes, PhantomData))
     }
+}
 
+impl<B, T> LayoutVerified<B, [T]>
+where
+    B: Deref<Target = [u8]> + SplitAt
+{
     /// Constructs a new `LayoutVerified` of a slice type from the prefix of a
     /// byte slice.
     ///
@@ -979,15 +998,13 @@ where
     /// `new_slice_from_prefix` panics if `T` is a zero-sized type.
     #[inline]
     pub fn new_slice_from_prefix(bytes: B, count: usize) -> Option<(LayoutVerified<B, [T]>, B)> {
-        let expected_len = match mem::size_of::<T>().checked_mul(count) {
-            Some(len) => len,
-            None => return None,
-        };
-        if bytes.len() < expected_len {
-            return None;
-        }
-        let (prefix, bytes) = bytes.split_at(expected_len);
-        Self::new_slice(prefix).map(move |l| (l, bytes))
+        mem::size_of::<T>()
+            .checked_mul(count)
+            .filter(|&expected_len| bytes.len() >= expected_len)
+            .and_then(|expected_len| {
+                let (prefix, bytes) = bytes.split_at(expected_len);
+                Self::new_slice(prefix).map(|l| (l, bytes))
+            })
     }
 
     /// Constructs a new `LayoutVerified` of a slice type from the suffix of a
@@ -1005,19 +1022,17 @@ where
     /// `new_slice_from_suffix` panics if `T` is a zero-sized type.
     #[inline]
     pub fn new_slice_from_suffix(bytes: B, count: usize) -> Option<(B, LayoutVerified<B, [T]>)> {
-        let expected_len = match mem::size_of::<T>().checked_mul(count) {
-            Some(len) => len,
-            None => return None,
-        };
-        if bytes.len() < expected_len {
-            return None;
-        }
-        let (bytes, suffix) = bytes.split_at(expected_len);
-        Self::new_slice(suffix).map(move |l| (bytes, l))
+        mem::size_of::<T>()
+            .checked_mul(count)
+            .filter(|&expected_len| bytes.len() >= expected_len)
+            .and_then(|expected_len| {
+                let (bytes, suffix) = bytes.split_at(expected_len);
+                Self::new_slice(suffix).map(move |l| (bytes, l))
+            })
     }
 }
 
-fn map_zeroed<B: ByteSliceMut, T: ?Sized>(
+fn map_zeroed<B: DerefMut<Target = [u8]>, T: ?Sized>(
     opt: Option<LayoutVerified<B, T>>,
 ) -> Option<LayoutVerified<B, T>> {
     match opt {
@@ -1031,7 +1046,7 @@ fn map_zeroed<B: ByteSliceMut, T: ?Sized>(
     }
 }
 
-fn map_prefix_tuple_zeroed<B: ByteSliceMut, T: ?Sized>(
+fn map_prefix_tuple_zeroed<B: DerefMut<Target = [u8]>, T: ?Sized>(
     opt: Option<(LayoutVerified<B, T>, B)>,
 ) -> Option<(LayoutVerified<B, T>, B)> {
     match opt {
@@ -1045,7 +1060,7 @@ fn map_prefix_tuple_zeroed<B: ByteSliceMut, T: ?Sized>(
     }
 }
 
-fn map_suffix_tuple_zeroed<B: ByteSliceMut, T: ?Sized>(
+fn map_suffix_tuple_zeroed<B: DerefMut<Target = [u8]>, T: ?Sized>(
     opt: Option<(B, LayoutVerified<B, T>)>,
 ) -> Option<(B, LayoutVerified<B, T>)> {
     map_prefix_tuple_zeroed(opt.map(|(a, b)| (b, a))).map(|(a, b)| (b, a))
@@ -1053,7 +1068,7 @@ fn map_suffix_tuple_zeroed<B: ByteSliceMut, T: ?Sized>(
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
 {
     /// Constructs a new `LayoutVerified` after zeroing the bytes.
     ///
@@ -1068,7 +1083,12 @@ where
     pub fn new_zeroed(bytes: B) -> Option<LayoutVerified<B, T>> {
         map_zeroed(Self::new(bytes))
     }
+}
 
+impl<B, T> LayoutVerified<B, T>
+where
+    B: DerefMut<Target = [u8]> + SplitAt
+{
     /// Constructs a new `LayoutVerified` from the prefix of a byte slice,
     /// zeroing the prefix.
     ///
@@ -1107,7 +1127,7 @@ where
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
 {
     /// Constructs a new `LayoutVerified` of a slice type after zeroing the
     /// bytes.
@@ -1128,7 +1148,12 @@ where
     pub fn new_slice_zeroed(bytes: B) -> Option<LayoutVerified<B, [T]>> {
         map_zeroed(Self::new_slice(bytes))
     }
+}
 
+impl<B, T> LayoutVerified<B, [T]>
+where
+    B: DerefMut<Target = [u8]> + SplitAt
+{
     /// Constructs a new `LayoutVerified` of a slice type from the prefix of a
     /// byte slice, after zeroing the bytes.
     ///
@@ -1182,7 +1207,7 @@ where
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: Unaligned,
 {
     /// Constructs a new `LayoutVerified` for a type with no alignment
@@ -1194,11 +1219,18 @@ where
     #[inline]
     pub fn new_unaligned(bytes: B) -> Option<LayoutVerified<B, T>> {
         if bytes.len() != mem::size_of::<T>() {
-            return None;
+            None
+        } else {
+            Some(LayoutVerified(bytes, PhantomData))
         }
-        Some(LayoutVerified(bytes, PhantomData))
     }
+}
 
+impl<B, T> LayoutVerified<B, T>
+where
+    B: Deref<Target = [u8]> + SplitAt,
+    T: Unaligned
+{
     /// Constructs a new `LayoutVerified` from the prefix of a byte slice for a
     /// type with no alignment requirement.
     ///
@@ -1209,10 +1241,11 @@ where
     #[inline]
     pub fn new_unaligned_from_prefix(bytes: B) -> Option<(LayoutVerified<B, T>, B)> {
         if bytes.len() < mem::size_of::<T>() {
-            return None;
+            None
+        } else {
+            let (bytes, suffix) = bytes.split_at(mem::size_of::<T>());
+            Some((LayoutVerified(bytes, PhantomData), suffix))
         }
-        let (bytes, suffix) = bytes.split_at(mem::size_of::<T>());
-        Some((LayoutVerified(bytes, PhantomData), suffix))
     }
 
     /// Constructs a new `LayoutVerified` from the suffix of a byte slice for a
@@ -1226,16 +1259,17 @@ where
     pub fn new_unaligned_from_suffix(bytes: B) -> Option<(B, LayoutVerified<B, T>)> {
         let bytes_len = bytes.len();
         if bytes_len < mem::size_of::<T>() {
-            return None;
+            None
+        } else {
+            let (prefix, bytes) = bytes.split_at(bytes_len - mem::size_of::<T>());
+            Some((prefix, LayoutVerified(bytes, PhantomData)))
         }
-        let (prefix, bytes) = bytes.split_at(bytes_len - mem::size_of::<T>());
-        Some((prefix, LayoutVerified(bytes, PhantomData)))
     }
 }
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: Unaligned,
 {
     /// Constructs a new `LayoutVerified` of a slice type with no alignment
@@ -1252,11 +1286,18 @@ where
     pub fn new_slice_unaligned(bytes: B) -> Option<LayoutVerified<B, [T]>> {
         assert_ne!(mem::size_of::<T>(), 0);
         if bytes.len() % mem::size_of::<T>() != 0 {
-            return None;
+            None
+        } else {
+            Some(LayoutVerified(bytes, PhantomData))
         }
-        Some(LayoutVerified(bytes, PhantomData))
     }
+}
 
+impl<B, T> LayoutVerified<B, [T]>
+where
+    B: Deref<Target = [u8]> + SplitAt,
+    T: Unaligned
+{
     /// Constructs a new `LayoutVerified` of a slice type with no alignment
     /// requirement from the prefix of a byte slice.
     ///
@@ -1275,15 +1316,13 @@ where
         bytes: B,
         count: usize,
     ) -> Option<(LayoutVerified<B, [T]>, B)> {
-        let expected_len = match mem::size_of::<T>().checked_mul(count) {
-            Some(len) => len,
-            None => return None,
-        };
-        if bytes.len() < expected_len {
-            return None;
-        }
-        let (prefix, bytes) = bytes.split_at(expected_len);
-        Self::new_slice_unaligned(prefix).map(move |l| (l, bytes))
+        mem::size_of::<T>()
+            .checked_mul(count)
+            .filter(|&expected_len| bytes.len() >= expected_len)
+            .and_then(|expected_len| {
+                let (prefix, bytes) = bytes.split_at(expected_len);
+                Self::new_slice_unaligned(prefix).map(|l| (l, bytes))
+            })
     }
 
     /// Constructs a new `LayoutVerified` of a slice type with no alignment
@@ -1304,21 +1343,19 @@ where
         bytes: B,
         count: usize,
     ) -> Option<(B, LayoutVerified<B, [T]>)> {
-        let expected_len = match mem::size_of::<T>().checked_mul(count) {
-            Some(len) => len,
-            None => return None,
-        };
-        if bytes.len() < expected_len {
-            return None;
-        }
-        let (bytes, suffix) = bytes.split_at(expected_len);
-        Self::new_slice_unaligned(suffix).map(move |l| (bytes, l))
+        mem::size_of::<T>()
+            .checked_mul(count)
+            .filter(|&expected_len| bytes.len() >= expected_len)
+            .and_then(|expected_len| {
+                let (bytes, suffix) = bytes.split_at(expected_len);
+                Self::new_slice_unaligned(suffix).map(move |l| (bytes, l))
+            })
     }
 }
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: Unaligned,
 {
     /// Constructs a new `LayoutVerified` for a type with no alignment
@@ -1335,7 +1372,13 @@ where
     pub fn new_unaligned_zeroed(bytes: B) -> Option<LayoutVerified<B, T>> {
         map_zeroed(Self::new_unaligned(bytes))
     }
+}
 
+impl<B, T> LayoutVerified<B, T>
+where
+    B: DerefMut<Target = [u8]> + SplitAt,
+    T: Unaligned
+{
     /// Constructs a new `LayoutVerified` from the prefix of a byte slice for a
     /// type with no alignment requirement, zeroing the prefix.
     ///
@@ -1371,7 +1414,7 @@ where
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: Unaligned,
 {
     /// Constructs a new `LayoutVerified` for a slice type with no alignment
@@ -1392,7 +1435,13 @@ where
     pub fn new_slice_unaligned_zeroed(bytes: B) -> Option<LayoutVerified<B, [T]>> {
         map_zeroed(Self::new_slice_unaligned(bytes))
     }
+}
 
+impl<B, T> LayoutVerified<B, [T]>
+where
+    B: DerefMut<Target = [u8]> + SplitAt,
+    T: Unaligned
+{
     /// Constructs a new `LayoutVerified` of a slice type with no alignment
     /// requirement from the prefix of a byte slice, after zeroing the bytes.
     ///
@@ -1446,89 +1495,97 @@ where
     }
 }
 
-impl<'a, B, T> LayoutVerified<B, T>
-where
-    B: 'a + ByteSlice,
-    T: FromBytes,
+impl<B, T> LayoutVerified<B, T> 
 {
-    /// Converts this `LayoutVerified` into a reference.
-    ///
-    /// `into_ref` consumes the `LayoutVerified`, and returns a reference to
-    /// `T`.
-    pub fn into_ref(self) -> &'a T {
-        // NOTE: This is safe because `B` is guaranteed to live for the lifetime
-        // `'a`, meaning that a) the returned reference cannot outlive the `B`
-        // from which `self` was constructed and, b) no mutable methods on that
-        // `B` can be called during the lifetime of the returned reference. See
-        // the documentation on `deref_helper` for what invariants we are
-        // required to uphold.
-        unsafe { self.deref_helper() }
+    /// Consumes this `LayoutVerified` and returns the underlying bytes.
+    pub fn into_inner(self) -> B {
+        self.0
     }
 }
 
-impl<'a, B, T> LayoutVerified<B, T>
-where
-    B: 'a + ByteSliceMut,
-    T: FromBytes + AsBytes,
-{
-    /// Converts this `LayoutVerified` into a mutable reference.
-    ///
-    /// `into_mut` consumes the `LayoutVerified`, and returns a mutable
-    /// reference to `T`.
-    pub fn into_mut(mut self) -> &'a mut T {
-        // NOTE: This is safe because `B` is guaranteed to live for the lifetime
-        // `'a`, meaning that a) the returned reference cannot outlive the `B`
-        // from which `self` was constructed and, b) no other methods - mutable
-        // or immutable - on that `B` can be called during the lifetime of the
-        // returned reference. See the documentation on `deref_mut_helper` for
-        // what invariants we are required to uphold.
-        unsafe { self.deref_mut_helper() }
-    }
-}
+// impl<'a, B, T> LayoutVerified<B, T>
+// where
+//     B: 'a + ByteSlice,
+//     T: FromBytes,
+// {
+//     /// Converts this `LayoutVerified` into a reference.
+//     ///
+//     /// `into_ref` consumes the `LayoutVerified`, and returns a reference to
+//     /// `T`.
+//     pub fn into_ref(self) -> &'a T {
+//         // NOTE: This is safe because `B` is guaranteed to live for the lifetime
+//         // `'a`, meaning that a) the returned reference cannot outlive the `B`
+//         // from which `self` was constructed and, b) no mutable methods on that
+//         // `B` can be called during the lifetime of the returned reference. See
+//         // the documentation on `deref_helper` for what invariants we are
+//         // required to uphold.
+//         unsafe { self.deref_helper() }
+//     }
+// }
 
-impl<'a, B, T> LayoutVerified<B, [T]>
-where
-    B: 'a + ByteSlice,
-    T: FromBytes,
-{
-    /// Converts this `LayoutVerified` into a slice reference.
-    ///
-    /// `into_slice` consumes the `LayoutVerified`, and returns a reference to
-    /// `[T]`.
-    pub fn into_slice(self) -> &'a [T] {
-        // NOTE: This is safe because `B` is guaranteed to live for the lifetime
-        // `'a`, meaning that a) the returned reference cannot outlive the `B`
-        // from which `self` was constructed and, b) no mutable methods on that
-        // `B` can be called during the lifetime of the returned reference. See
-        // the documentation on `deref_slice_helper` for what invariants we are
-        // required to uphold.
-        unsafe { self.deref_slice_helper() }
-    }
-}
+// impl<'a, B, T> LayoutVerified<B, T>
+// where
+//     B: 'a + ByteSliceMut,
+//     T: FromBytes + AsBytes,
+// {
+//     /// Converts this `LayoutVerified` into a mutable reference.
+//     ///
+//     /// `into_mut` consumes the `LayoutVerified`, and returns a mutable
+//     /// reference to `T`.
+//     pub fn into_mut(mut self) -> &'a mut T {
+//         // NOTE: This is safe because `B` is guaranteed to live for the lifetime
+//         // `'a`, meaning that a) the returned reference cannot outlive the `B`
+//         // from which `self` was constructed and, b) no other methods - mutable
+//         // or immutable - on that `B` can be called during the lifetime of the
+//         // returned reference. See the documentation on `deref_mut_helper` for
+//         // what invariants we are required to uphold.
+//         unsafe { self.deref_mut_helper() }
+//     }
+// }
 
-impl<'a, B, T> LayoutVerified<B, [T]>
-where
-    B: 'a + ByteSliceMut,
-    T: FromBytes + AsBytes,
-{
-    /// Converts this `LayoutVerified` into a mutable slice reference.
-    ///
-    /// `into_mut_slice` consumes the `LayoutVerified`, and returns a mutable
-    /// reference to `[T]`.
-    pub fn into_mut_slice(mut self) -> &'a mut [T] {
-        // NOTE: This is safe because `B` is guaranteed to live for the lifetime
-        // `'a`, meaning that a) the returned reference cannot outlive the `B`
-        // from which `self` was constructed and, b) no other methods - mutable
-        // or immutable - on that `B` can be called during the lifetime of the
-        // returned reference. See the documentation on `deref_mut_slice_helper`
-        // for what invariants we are required to uphold.
-        unsafe { self.deref_mut_slice_helper() }
-    }
-}
+// impl<'a, B, T> LayoutVerified<B, [T]>
+// where
+//     B: 'a + ByteSlice,
+//     T: FromBytes,
+// {
+//     /// Converts this `LayoutVerified` into a slice reference.
+//     ///
+//     /// `into_slice` consumes the `LayoutVerified`, and returns a reference to
+//     /// `[T]`.
+//     pub fn into_slice(self) -> &'a [T] {
+//         // NOTE: This is safe because `B` is guaranteed to live for the lifetime
+//         // `'a`, meaning that a) the returned reference cannot outlive the `B`
+//         // from which `self` was constructed and, b) no mutable methods on that
+//         // `B` can be called during the lifetime of the returned reference. See
+//         // the documentation on `deref_slice_helper` for what invariants we are
+//         // required to uphold.
+//         unsafe { self.deref_slice_helper() }
+//     }
+// }
+
+// impl<'a, B, T> LayoutVerified<B, [T]>
+// where
+//     B: 'a + ByteSliceMut,
+//     T: FromBytes + AsBytes,
+// {
+//     /// Converts this `LayoutVerified` into a mutable slice reference.
+//     ///
+//     /// `into_mut_slice` consumes the `LayoutVerified`, and returns a mutable
+//     /// reference to `[T]`.
+//     pub fn into_mut_slice(mut self) -> &'a mut [T] {
+//         // NOTE: This is safe because `B` is guaranteed to live for the lifetime
+//         // `'a`, meaning that a) the returned reference cannot outlive the `B`
+//         // from which `self` was constructed and, b) no other methods - mutable
+//         // or immutable - on that `B` can be called during the lifetime of the
+//         // returned reference. See the documentation on `deref_mut_slice_helper`
+//         // for what invariants we are required to uphold.
+//         unsafe { self.deref_mut_slice_helper() }
+//     }
+// }
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
 {
     /// Creates an immutable reference to `T` with a specific lifetime.
@@ -1549,7 +1606,7 @@ where
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: FromBytes + AsBytes,
 {
     /// Creates a mutable reference to `T` with a specific lifetime.
@@ -1570,7 +1627,7 @@ where
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
 {
     /// Creates an immutable reference to `[T]` with a specific lifetime.
@@ -1590,7 +1647,7 @@ where
 
 impl<B, T> LayoutVerified<B, [T]>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: FromBytes + AsBytes,
 {
     /// Creates a mutable reference to `[T]` with a specific lifetime.
@@ -1615,7 +1672,7 @@ fn aligned_to(bytes: &[u8], align: usize) -> bool {
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: ?Sized,
 {
     /// Gets the underlying bytes.
@@ -1627,7 +1684,7 @@ where
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: ?Sized,
 {
     /// Gets the underlying bytes mutably.
@@ -1639,7 +1696,7 @@ where
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
 {
     /// Reads a copy of `T`.
@@ -1655,7 +1712,7 @@ where
 
 impl<B, T> LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: AsBytes,
 {
     /// Writes the bytes of `t` and then forgets `t`.
@@ -1670,12 +1727,149 @@ where
     }
 }
 
+impl<B, T> AsRef<T> for LayoutVerified<B, T>
+where
+    B: Deref<Target = [u8]>,
+    T: FromBytes,
+{
+    #[inline]
+    fn as_ref(&self) -> &T {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no mutable methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_helper` for what invariants we are required
+        // to uphold.
+        unsafe { self.deref_helper() }
+    }
+}
+
+impl<B, T> AsMut<T> for LayoutVerified<B, T>
+where
+    B: DerefMut<Target = [u8]>,
+    T: FromBytes + AsBytes,
+{
+    #[inline]
+    fn as_mut(&mut self) -> &mut T {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no other methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_mut_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_mut_helper() }
+    }
+}
+
+impl<B, T> AsRef<[T]> for LayoutVerified<B, [T]>
+where
+    B: Deref<Target = [u8]>,
+    T: FromBytes,
+{
+    #[inline]
+    fn as_ref(&self) -> &[T] {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no mutable methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_slice_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_slice_helper() }
+    }
+}
+
+impl<B, T> AsMut<[T]> for LayoutVerified<B, [T]>
+where
+    B: DerefMut<Target = [u8]>,
+    T: FromBytes + AsBytes,
+{
+    #[inline]
+    fn as_mut(&mut self) -> &mut [T] {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no other methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_mut_slice_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_mut_slice_helper() }
+    }
+}
+
+impl<B, T> Borrow<T> for LayoutVerified<B, T>
+where
+    B: Deref<Target = [u8]>,
+    T: FromBytes,
+{
+    #[inline]
+    fn borrow(&self) -> &T {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no mutable methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_helper` for what invariants we are required
+        // to uphold.
+        unsafe { self.deref_helper() }
+    }
+}
+
+impl<B, T> BorrowMut<T> for LayoutVerified<B, T>
+where
+    B: DerefMut<Target = [u8]>,
+    T: FromBytes + AsBytes,
+{
+    #[inline]
+    fn borrow_mut(&mut self) -> &mut T {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no other methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_mut_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_mut_helper() }
+    }
+}
+
+impl<B, T> Borrow<[T]> for LayoutVerified<B, [T]>
+where
+    B: Deref<Target = [u8]>,
+    T: FromBytes,
+{
+    #[inline]
+    fn borrow(&self) -> &[T] {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no mutable methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_slice_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_slice_helper() }
+    }
+}
+
+impl<B, T> BorrowMut<[T]> for LayoutVerified<B, [T]>
+where
+    B: DerefMut<Target = [u8]>,
+    T: FromBytes + AsBytes,
+{
+    #[inline]
+    fn borrow_mut(&mut self) -> &mut [T] {
+        // SAFETY: This is safe because the lifetime of `self` is the same as
+        // the lifetime of the return value, meaning that a) the returned
+        // reference cannot outlive `self` and, b) no other methods on `self`
+        // can be called during the lifetime of the returned reference. See the
+        // documentation on `deref_mut_slice_helper` for what invariants we are
+        // required to uphold.
+        unsafe { self.deref_mut_slice_helper() }
+    }
+}
+
 impl<B, T> Deref for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
 {
     type Target = T;
+
     #[inline]
     fn deref(&self) -> &T {
         // SAFETY: This is safe because the lifetime of `self` is the same as
@@ -1690,7 +1884,7 @@ where
 
 impl<B, T> DerefMut for LayoutVerified<B, T>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: FromBytes + AsBytes,
 {
     #[inline]
@@ -1707,7 +1901,7 @@ where
 
 impl<B, T> Deref for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
 {
     type Target = [T];
@@ -1725,7 +1919,7 @@ where
 
 impl<B, T> DerefMut for LayoutVerified<B, [T]>
 where
-    B: ByteSliceMut,
+    B: DerefMut<Target = [u8]>,
     T: FromBytes + AsBytes,
 {
     #[inline]
@@ -1742,7 +1936,7 @@ where
 
 impl<T, B> Display for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Display,
 {
     #[inline]
@@ -1754,7 +1948,7 @@ where
 
 impl<T, B> Display for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes,
     [T]: Display,
 {
@@ -1767,7 +1961,7 @@ where
 
 impl<T, B> Debug for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Debug,
 {
     #[inline]
@@ -1779,7 +1973,7 @@ where
 
 impl<T, B> Debug for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Debug,
 {
     #[inline]
@@ -1791,21 +1985,21 @@ where
 
 impl<T, B> Eq for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Eq,
 {
 }
 
 impl<T, B> Eq for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Eq,
 {
 }
 
 impl<T, B> PartialEq for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + PartialEq,
 {
     #[inline]
@@ -1816,7 +2010,7 @@ where
 
 impl<T, B> PartialEq for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + PartialEq,
 {
     #[inline]
@@ -1827,7 +2021,7 @@ where
 
 impl<T, B> Ord for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Ord,
 {
     #[inline]
@@ -1840,7 +2034,7 @@ where
 
 impl<T, B> Ord for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + Ord,
 {
     #[inline]
@@ -1853,7 +2047,7 @@ where
 
 impl<T, B> PartialOrd for LayoutVerified<B, T>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + PartialOrd,
 {
     #[inline]
@@ -1866,7 +2060,7 @@ where
 
 impl<T, B> PartialOrd for LayoutVerified<B, [T]>
 where
-    B: ByteSlice,
+    B: Deref<Target = [u8]>,
     T: FromBytes + PartialOrd,
 {
     #[inline]
@@ -1888,11 +2082,9 @@ mod sealed {
     #[cfg(feature = "bytes")]
     use bytes::{Bytes, BytesMut};
     #[cfg(feature = "bytes")]
-    #[allow(clippy::extra_unused_lifetimes)]
-    impl<'a> Sealed for Bytes {}
+    impl Sealed for Bytes {}
     #[cfg(feature = "bytes")]
-    #[allow(clippy::extra_unused_lifetimes)]
-    impl<'a> Sealed for BytesMut {}
+    impl Sealed for BytesMut {}
 }
 
 // ByteSlice and ByteSliceMut abstract over [u8] references (&[u8], &mut [u8],
@@ -1918,113 +2110,93 @@ mod sealed {
 ///
 /// [`Vec<u8>`]: std::vec::Vec
 /// [`split_at`]: crate::ByteSlice::split_at
-pub unsafe trait ByteSlice: Deref<Target = [u8]> + Sized + self::sealed::Sealed {
-    /// Gets a raw pointer to the first byte in the slice.
-    fn as_ptr(&self) -> *const u8;
+pub unsafe trait SplitAt: Deref<Target = [u8]> + Sized + self::sealed::Sealed {
+    // /// Gets a raw pointer to the first byte in the slice.
+    // fn as_ptr(&self) -> *const u8;
 
-    /// Splits the slice at the midpoint.
+    /// Splits `Self` into two at the given index.
     ///
-    /// `x.split_at(mid)` returns `x[..mid]` and `x[mid..]`.
+    /// `x.split_at(at)` returns `x[..index]` and `x[index..]`.
     ///
     /// # Panics
     ///
-    /// `x.split_at(mid)` panics if `mid > x.len()`.
-    fn split_at(self, mid: usize) -> (Self, Self);
+    /// `x.split_at(at)` panics if `at > x.len()`.
+    fn split_at(self, index: usize) -> (Self, Self);
 }
 
-#[allow(clippy::missing_safety_doc)] // TODO(fxbug.dev/99068)
+// #[allow(clippy::missing_safety_doc)] // TODO(fxbug.dev/99068)
 /// A mutable reference to a byte slice.
 ///
 /// `ByteSliceMut` abstracts over various ways of storing a mutable reference to
 /// a byte slice, and is implemented for various special reference types such as
 /// `RefMut<[u8]>`.
-pub unsafe trait ByteSliceMut: ByteSlice + DerefMut {
-    /// Gets a mutable raw pointer to the first byte in the slice.
-    fn as_mut_ptr(&mut self) -> *mut u8;
+// pub unsafe trait ByteSliceMut: ByteSlice + DerefMut {
+//     /// Gets a mutable raw pointer to the first byte in the slice.
+//     fn as_mut_ptr(&mut self) -> *mut u8;
+// }
+
+unsafe impl<'a> SplitAt for &'a [u8] {
+    fn split_at(self, index: usize) -> (Self, Self) {
+        <[u8]>::split_at(self, index)
+    }
 }
 
-unsafe impl<'a> ByteSlice for &'a [u8] {
-    fn as_ptr(&self) -> *const u8 {
-        <[u8]>::as_ptr(self)
-    }
-    fn split_at(self, mid: usize) -> (Self, Self) {
-        <[u8]>::split_at(self, mid)
+unsafe impl<'a> SplitAt for &'a mut [u8] {
+    fn split_at(self, index: usize) -> (Self, Self) {
+        <[u8]>::split_at_mut(self, index)
     }
 }
-unsafe impl<'a> ByteSlice for &'a mut [u8] {
-    fn as_ptr(&self) -> *const u8 {
-        <[u8]>::as_ptr(self)
-    }
-    fn split_at(self, mid: usize) -> (Self, Self) {
-        <[u8]>::split_at_mut(self, mid)
+
+unsafe impl<'a> SplitAt for Ref<'a, [u8]> {
+    fn split_at(self, index: usize) -> (Self, Self) {
+        Ref::map_split(self, |slice| <[u8]>::split_at(slice, index))
     }
 }
-unsafe impl<'a> ByteSlice for Ref<'a, [u8]> {
-    fn as_ptr(&self) -> *const u8 {
-        <[u8]>::as_ptr(self)
-    }
-    fn split_at(self, mid: usize) -> (Self, Self) {
-        Ref::map_split(self, |slice| <[u8]>::split_at(slice, mid))
-    }
-}
-unsafe impl<'a> ByteSlice for RefMut<'a, [u8]> {
-    fn as_ptr(&self) -> *const u8 {
-        <[u8]>::as_ptr(self)
-    }
+
+unsafe impl<'a> SplitAt for RefMut<'a, [u8]> {
     fn split_at(self, mid: usize) -> (Self, Self) {
         RefMut::map_split(self, |slice| <[u8]>::split_at_mut(slice, mid))
     }
 }
 
-unsafe impl<'a> ByteSliceMut for &'a mut [u8] {
-    fn as_mut_ptr(&mut self) -> *mut u8 {
-        <[u8]>::as_mut_ptr(self)
-    }
-}
-unsafe impl<'a> ByteSliceMut for RefMut<'a, [u8]> {
-    fn as_mut_ptr(&mut self) -> *mut u8 {
-        <[u8]>::as_mut_ptr(self)
-    }
-}
+// unsafe impl<'a> ByteSliceMut for &'a mut [u8] {
+//     fn as_mut_ptr(&mut self) -> *mut u8 {
+//         <[u8]>::as_mut_ptr(self)
+//     }
+// }
+// unsafe impl<'a> ByteSliceMut for RefMut<'a, [u8]> {
+//     fn as_mut_ptr(&mut self) -> *mut u8 {
+//         <[u8]>::as_mut_ptr(self)
+//     }
+// }
 
 #[cfg(feature = "bytes")]
 mod bytes {
     use bytes::{Bytes, BytesMut};
 
-    use super::{ByteSlice, ByteSliceMut};
+    use super::SplitAt;
 
-    #[allow(clippy::extra_unused_lifetimes)]
-    unsafe impl<'a> ByteSlice for Bytes {
-        fn as_ptr(&self) -> *const u8 {
-            <[u8]>::as_ptr(self)
-        }
-
-        fn split_at(mut self, middle: usize) -> (Self, Self) {
-            let other = self.split_off(middle);
+    unsafe impl SplitAt for Bytes {
+        fn split_at(mut self, at: usize) -> (Self, Self) {
+            let other = self.split_off(at);
 
             (self, other)
         }
     }
 
-    #[allow(clippy::extra_unused_lifetimes)]
-    unsafe impl<'a> ByteSlice for BytesMut {
-        fn as_ptr(&self) -> *const u8 {
-            <[u8]>::as_ptr(self)
-        }
-
-        fn split_at(mut self, middle: usize) -> (Self, Self) {
-            let other = self.split_off(middle);
+    unsafe impl SplitAt for BytesMut {
+        fn split_at(mut self, at: usize) -> (Self, Self) {
+            let other = self.split_off(at);
 
             (self, other)
         }
     }
 
-    #[allow(clippy::extra_unused_lifetimes)]
-    unsafe impl<'a> ByteSliceMut for BytesMut {
-        fn as_mut_ptr(&mut self) -> *mut u8 {
-            <[u8]>::as_mut_ptr(self)
-        }
-    }
+    // unsafe impl ByteSliceMut for BytesMut {
+    //     fn as_mut_ptr(&mut self) -> *mut u8 {
+    //         <[u8]>::as_mut_ptr(self)
+    //     }
+    // }
 }
 
 #[cfg(any(test, feature = "alloc"))]
@@ -2081,6 +2253,7 @@ pub use alloc_support::*;
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unreadable_literal)]
+    #![allow(clippy::vec_init_then_push)]
 
     use core::ops::Deref;
 
@@ -2187,7 +2360,7 @@ mod tests {
     // between the typed and untyped representations, that reads via `deref` and
     // `read` behave the same, and that writes via `deref_mut` and `write`
     // behave the same
-    fn test_new_helper<'a>(mut lv: LayoutVerified<&'a mut [u8], u64>) {
+    fn test_new_helper(mut lv: LayoutVerified<&mut [u8], u64>) {
         // assert that the value starts at 0
         assert_eq!(*lv, 0);
         assert_eq!(lv.read(), 0);
@@ -2212,7 +2385,7 @@ mod tests {
     // verify that values written to a LayoutVerified are properly shared
     // between the typed and untyped representations; pass a value with
     // `typed_len` `u64`s backed by an array of `typed_len * 8` bytes.
-    fn test_new_helper_slice<'a>(mut lv: LayoutVerified<&'a mut [u8], [u64]>, typed_len: usize) {
+    fn test_new_helper_slice(mut lv: LayoutVerified<&mut [u8], [u64]>, typed_len: usize) {
         // assert that the value starts out zeroed
         assert_eq!(&*lv, vec![0; typed_len].as_slice());
 
@@ -2240,7 +2413,7 @@ mod tests {
     // between the typed and untyped representations, that reads via `deref` and
     // `read` behave the same, and that writes via `deref_mut` and `write`
     // behave the same
-    fn test_new_helper_unaligned<'a>(mut lv: LayoutVerified<&'a mut [u8], [u8; 8]>) {
+    fn test_new_helper_unaligned(mut lv: LayoutVerified<&mut [u8], [u8; 8]>) {
         // assert that the value starts at 0
         assert_eq!(*lv, [0; 8]);
         assert_eq!(lv.read(), [0; 8]);
@@ -2265,7 +2438,7 @@ mod tests {
     // verify that values written to a LayoutVerified are properly shared
     // between the typed and untyped representations; pass a value with
     // `len` `u8`s backed by an array of `len` bytes.
-    fn test_new_helper_slice_unaligned<'a>(mut lv: LayoutVerified<&'a mut [u8], [u8]>, len: usize) {
+    fn test_new_helper_slice_unaligned(mut lv: LayoutVerified<&mut [u8], [u8]>, len: usize) {
         // assert that the value starts out zeroed
         assert_eq!(&*lv, vec![0u8; len].as_slice());
 
@@ -2791,8 +2964,8 @@ mod tests {
 
         let bytes = Bytes::from_static(FOO);
         let expected = [Foo { a: [U16::new(0xffff); 12] }];
-        let actual: &[Foo] = LayoutVerified::new_slice_unaligned(bytes).unwrap().into_slice();
-        assert_eq!(actual, &expected[..]);
+        let actual = LayoutVerified::<_, [Foo]>::new_slice_unaligned(bytes).unwrap();
+        assert_eq!(*actual, expected);
     }
 
     #[test]

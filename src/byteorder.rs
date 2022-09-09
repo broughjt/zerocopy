@@ -29,6 +29,8 @@
 //!
 //! ```edition2018
 //! # use zerocopy_jackson::*;
+//! use core::ops::Deref;
+//! 
 //! use ::byteorder::NetworkEndian;
 //!
 //! #[derive(FromBytes, AsBytes, Unaligned)]
@@ -40,12 +42,12 @@
 //!     checksum: U16<NetworkEndian>,
 //! }
 //!
-//! struct UdpPacket<B: ByteSlice> {
+//! struct UdpPacket<B: Deref<Target = [u8]>> {
 //!     header: LayoutVerified<B, UdpHeader>,
 //!     body: B,
 //! }
 //!
-//! impl<B: ByteSlice> UdpPacket<B> {
+//! impl<B: Deref<Target = [u8]> + SplitAt> UdpPacket<B> {
 //!     fn parse(bytes: B) -> Option<UdpPacket<B>> {
 //!         let (header, body) = LayoutVerified::new_from_prefix(bytes)?;
 //!         Some(UdpPacket { header, body })
