@@ -28,7 +28,7 @@
 //! UDP:
 //!
 //! ```edition2018
-//! # use zerocopy_jackson::*;
+//! # use zerocopy_copy::*;
 //! use core::ops::Deref;
 //! 
 //! use ::byteorder::NetworkEndian;
@@ -66,12 +66,12 @@ use core::fmt::{self, Binary, Debug, Display, Formatter, LowerHex, Octal, UpperH
 use core::marker::PhantomData;
 use core::num::TryFromIntError;
 
-use zerocopy_jackson_derive::*;
+use zerocopy_copy_derive::*;
 
 use crate::AsBytes;
 // This allows the custom derives to work. See the comment on this module for an
 // explanation.
-use crate::zerocopy_jackson;
+use crate::zerocopy_copy;
 
 // NOTE: We don't reexport `WriteBytesExt` or `ReadBytesExt` because those are
 // only available with the `std` feature enabled, and zerocopy is `no_std` by

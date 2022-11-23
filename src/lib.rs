@@ -48,7 +48,7 @@
 pub mod byteorder;
 
 pub use crate::byteorder::*;
-pub use zerocopy_jackson_derive::*;
+pub use zerocopy_copy_derive::*;
 
 use core::borrow::{Borrow, BorrowMut};
 use core::cell::{Ref, RefMut};
@@ -67,7 +67,7 @@ use core::slice;
 // This is a hack to allow derives of FromBytes, AsBytes, and Unaligned to work
 // in this crate. They assume that zerocopy is linked as an extern crate, so
 // they access items from it as `zerocopy::Xxx`. This makes that still work.
-mod zerocopy_jackson {
+mod zerocopy_copy {
     pub use crate::*;
 }
 
@@ -853,7 +853,7 @@ macro_rules! transmute {
 /// ```rust
 /// use core::ops::{Deref, DerefMut};
 /// 
-/// use zerocopy_jackson::{AsBytes, FromBytes, LayoutVerified, SplitAt, Unaligned};
+/// use zerocopy_copy::{AsBytes, FromBytes, LayoutVerified, SplitAt, Unaligned};
 ///
 /// #[derive(FromBytes, AsBytes, Unaligned)]
 /// #[repr(C)]
@@ -2935,7 +2935,7 @@ mod tests {
     #[test]
     fn test_array() {
         // This is a hack, as per above in `test_as_bytes_methods`.
-        mod zerocopy_jackson {
+        mod zerocopy_copy {
             pub use crate::*;
         }
         #[derive(FromBytes, AsBytes)]
