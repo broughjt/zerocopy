@@ -1,0 +1,34 @@
+image: rust:latest
+
+pipelines:
+  pull-requests:
+    '**':
+      - parallel:
+        - step:
+            name: Check
+            script:
+              - rustup component add clippy
+              - cargo clippy
+              - cargo clippy --all-features
+        - step:
+            name: Test
+            script:
+              - cargo test --all-features
+  tags:
+    '*':
+      - parallel:
+        - step:
+            name: Check
+            script:
+              - rustup component add clippy
+              - cargo clippy
+              - cargo clippy --all-features
+        - step:
+            name: Test
+            script:
+              - cargo test --all-features
+      - step:
+          name: Publish
+          script:
+            - cargo login --registry=monucrates $MONUCRATES_TOKEN
+            - cargo publish --registry=monucrates
